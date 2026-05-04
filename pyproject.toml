@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vibro-snn-research"
+version = "0.1.0"
+description = "Research pipeline for vibroacoustic fault and anomaly detection on the Ottawa bearing dataset."
+readme = "README.md"
+requires-python = ">=3.12"
+authors = [{ name = "Codex" }]
+dependencies = [
+  "PyWavelets",
+  "matplotlib",
+  "nbformat",
+  "numpy",
+  "pandas",
+  "psutil",
+  "PyYAML",
+  "scikit-learn",
+  "scipy",
+  "torch",
+  "xgboost",
+]
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]

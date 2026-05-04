@@ -1,0 +1,24 @@
+dataset: "University of Ottawa Ball-bearing Vibration and Acoustic Fault Data under Constant Load and Speed Conditions (UODS-VAFDC).zip"
+manifest_path: "outputs/manifests/ottawa_manifest.csv"
+split_name: "bearing_primary"
+window_length: 4096
+hop: 2048
+sample_rate: 42000
+crop_seconds: 8.0
+modalities: ["accel", "audio"]
+feature_frontend: "adaptive_wavelet"
+encoder: "none"
+classifier: "ann"
+optimizer:
+  name: "adam"
+  lr: 0.001
+  weight_decay: 0.0001
+seeds: [13]
+metrics: ["balanced_accuracy", "auroc", "auprc", "f1", "sensitivity", "specificity"]
+batch_size: 64
+epochs: 12
+patience: 4
+hidden_dim: 64
+frontend_filters: 32
+output_dir: "outputs/experiments/adaptive_wavelet_ann"
+use_primary_only: true
