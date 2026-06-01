@@ -46,14 +46,44 @@ class AdaptiveWaveletBank1d(nn.Module):
         x = torch.log1p(torch.abs(x))
         return self.pool(x)
 
+class VPProjection1d(nn.Module):
+
+    def __init__(self, latent_dim: int=32, frame_length: int=128, frame_step: int=128) -> None:
+        super().__init__()
+        self.latent_dim = latent_dim
+        self.frame_length = frame_length
+        self.frame_step = frame_step
+        self.basis = nn.Parameter(torch.empty(latent_dim, frame_length))
+        nn.init.kaiming_uniform_(self.basis, a=math.sqrt(5))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        frames = x.unfold(-1, self.frame_length, self.frame_step).squeeze(1)
+        basis = F.normalize(self.basis, dim=-1)
+        coefficients = torch.einsum('btl,kl->bkt', frames, basis)
+        return torch.log1p(torch.abs(coefficients))
+
+def _make_frontend(frontend: str, n_filters: int, vp_latent_dim: int, vp_frame_length: int, vp_frame_step: int) -> nn.Module:
+    if frontend == 'learnable_filterbank':
+        return LearnableFilterBank1d(n_filters=n_filters)
+    if frontend == 'adaptive_wavelet':
+        return AdaptiveWaveletBank1d(n_filters=n_filters)
+    if frontend == 'vp_projection':
+        return VPProjection1d(latent_dim=vp_latent_dim, frame_length=vp_frame_length, frame_step=vp_frame_step)
+    raise ValueError(f'Unsupported frontend: {frontend}')
+
+def _frontend_channels(frontend: str, n_filters: int, vp_latent_dim: int) -> int:
+    if frontend == 'vp_projection':
+        return vp_latent_dim
+    return n_filters
+
 class AdaptiveFrontEndANNModel(nn.Module):
 
-    def __init__(self, frontend: str='learnable_filterbank', n_filters: int=32, hidden_dim: int=64) -> None:
+    def __init__(self, frontend: str='learnable_filterbank', n_filters: int=32, hidden_dim: int=64, vp_latent_dim: int=32, vp_frame_length: int=128, vp_frame_step: int=128) -> None:
         super().__init__()
-        frontend_cls = LearnableFilterBank1d if frontend == 'learnable_filterbank' else AdaptiveWaveletBank1d
-        self.accel_frontend = frontend_cls(n_filters=n_filters)
-        self.audio_frontend = frontend_cls(n_filters=n_filters)
-        self.head = nn.Sequential(nn.Flatten(), nn.Linear(n_filters * 2 * 32, hidden_dim), nn.ReLU(), nn.Dropout(0.2), nn.Linear(hidden_dim, 1))
+        feature_channels = _frontend_channels(frontend, n_filters, vp_latent_dim)
+        self.accel_frontend = _make_frontend(frontend, n_filters, vp_latent_dim, vp_frame_length, vp_frame_step)
+        self.audio_frontend = _make_frontend(frontend, n_filters, vp_latent_dim, vp_frame_length, vp_frame_step)
+        self.head = nn.Sequential(nn.Flatten(), nn.Linear(feature_channels * 2 * 32, hidden_dim), nn.ReLU(), nn.Dropout(0.2), nn.Linear(hidden_dim, 1))
 
     def sequence_features(self, accel: torch.Tensor, audio: torch.Tensor) -> torch.Tensor:
         accel = self.accel_frontend(accel.unsqueeze(1))
@@ -103,14 +133,16 @@ class LIFLayer(nn.Module):
 
 class AdaptiveFrontEndSNNModel(nn.Module):
 
-    def __init__(self, frontend: str='adaptive_wavelet', encoder: str='delta', n_filters: int=32, hidden_dim: int=128) -> None:
+    def __init__(self, frontend: str='adaptive_wavelet', encoder: str='delta', n_filters: int=32, hidden_dim: int=128, vp_latent_dim: int=32, vp_frame_length: int=128, vp_frame_step: int=128, vp_encoder_decay: float=0.9, vp_spike_threshold: float=0.02) -> None:
         super().__init__()
-        frontend_cls = LearnableFilterBank1d if frontend == 'learnable_filterbank' else AdaptiveWaveletBank1d
         self.frontend_name = frontend
         self.encoder = encoder
-        self.accel_frontend = frontend_cls(n_filters=n_filters)
-        self.audio_frontend = frontend_cls(n_filters=n_filters)
-        encoded_dim = n_filters * 4 if encoder == 'delta' else n_filters * 2
+        self.vp_encoder_decay = vp_encoder_decay
+        self.vp_spike_threshold = vp_spike_threshold
+        feature_channels = _frontend_channels(frontend, n_filters, vp_latent_dim)
+        self.accel_frontend = _make_frontend(frontend, n_filters, vp_latent_dim, vp_frame_length, vp_frame_step)
+        self.audio_frontend = _make_frontend(frontend, n_filters, vp_latent_dim, vp_frame_length, vp_frame_step)
+        encoded_dim = feature_channels * 4 if encoder == 'delta' else feature_channels * 2
         self.lif_hidden = LIFLayer(encoded_dim, hidden_dim)
         self.readout = nn.Linear(hidden_dim, 1)
         self.last_spike_stats: dict[str, float] = {}
@@ -129,7 +161,17 @@ class AdaptiveFrontEndSNNModel(nn.Module):
         maxs = features.amax(dim=-1, keepdim=True)
         return (features - mins) / (maxs - mins + 1e-06)
 
+    def _encode_vp_latent(self, features: torch.Tensor) -> torch.Tensor:
+        normalized = self._normalize_features(features)
+        deltas = normalized[:, :, 1:] - self.vp_encoder_decay * normalized[:, :, :-1]
+        positive = (deltas > self.vp_spike_threshold).float()
+        negative = (deltas < -self.vp_spike_threshold).float()
+        encoded = torch.cat([positive, negative], dim=1)
+        return F.pad(encoded, (1, 0))
+
     def _encode(self, features: torch.Tensor) -> torch.Tensor:
+        if self.frontend_name == 'vp_projection' and self.encoder == 'delta':
+            return self._encode_vp_latent(features)
         if self.encoder == 'delta':
             deltas = features[:, :, 1:] - features[:, :, :-1]
             positive = (deltas > 0.02).float()
@@ -150,3 +192,13 @@ class AdaptiveFrontEndSNNModel(nn.Module):
         synaptic_ops = float(spike_count * self.readout.in_features)
         self.last_spike_stats = {'spike_count': spike_count, 'spike_density': spike_density, 'estimated_synaptic_ops': synaptic_ops}
         return logits
+
+class VPANNModel(AdaptiveFrontEndANNModel):
+
+    def __init__(self, n_filters: int=32, hidden_dim: int=64, vp_latent_dim: int=32, vp_frame_length: int=128, vp_frame_step: int=128) -> None:
+        super().__init__(frontend='vp_projection', n_filters=n_filters, hidden_dim=hidden_dim, vp_latent_dim=vp_latent_dim, vp_frame_length=vp_frame_length, vp_frame_step=vp_frame_step)
+
+class VPSNNModel(AdaptiveFrontEndSNNModel):
+
+    def __init__(self, encoder: str='delta', n_filters: int=32, hidden_dim: int=128, vp_latent_dim: int=32, vp_frame_length: int=128, vp_frame_step: int=128, vp_encoder_decay: float=0.9, vp_spike_threshold: float=0.02) -> None:
+        super().__init__(frontend='vp_projection', encoder=encoder, n_filters=n_filters, hidden_dim=hidden_dim, vp_latent_dim=vp_latent_dim, vp_frame_length=vp_frame_length, vp_frame_step=vp_frame_step, vp_encoder_decay=vp_encoder_decay, vp_spike_threshold=vp_spike_threshold)

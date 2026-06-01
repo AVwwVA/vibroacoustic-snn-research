@@ -16,7 +16,7 @@ from .efficiency import benchmark_classical_model, benchmark_torch_model
 from .features import FFTFeatureExtractor, MelSpectrogramExtractor, WaveletScalogramExtractor
 from .manifest import build_manifest
 from .metrics import compute_binary_metrics, summarize_metric_runs
-from .models import AdaptiveFrontEndANNModel, AdaptiveFrontEndSNNModel, RawSignalCNN, TwoBranchSpectrogramCNN
+from .models import AdaptiveFrontEndANNModel, AdaptiveFrontEndSNNModel, RawSignalCNN, TwoBranchSpectrogramCNN, VPANNModel, VPSNNModel
 from .training import make_raw_loader, make_tensor_loader, predict_classical_model, predict_torch_model, set_seed, train_classical_model, train_torch_model
 
 def _ensure_manifest(config: ExperimentConfig) -> Path:
@@ -217,9 +217,15 @@ def _train_neural_family(config: ExperimentConfig, output_dir: Path) -> dict[str
         model = RawSignalCNN(hidden_dim=config.hidden_dim)
         return _train_torch_raw_model(model, train_np, val_np, test_np, config, output_dir)
     if config.classifier == 'ann':
-        model = AdaptiveFrontEndANNModel(frontend=config.feature_frontend, n_filters=config.frontend_filters, hidden_dim=config.hidden_dim)
+        if config.feature_frontend == 'vp_projection':
+            model = VPANNModel(n_filters=config.frontend_filters, hidden_dim=config.hidden_dim, vp_latent_dim=config.vp_latent_dim, vp_frame_length=config.vp_frame_length, vp_frame_step=config.vp_frame_step)
+        else:
+            model = AdaptiveFrontEndANNModel(frontend=config.feature_frontend, n_filters=config.frontend_filters, hidden_dim=config.hidden_dim, vp_latent_dim=config.vp_latent_dim, vp_frame_length=config.vp_frame_length, vp_frame_step=config.vp_frame_step)
         return _train_torch_raw_model(model, train_np, val_np, test_np, config, output_dir)
-    model = AdaptiveFrontEndSNNModel(frontend=config.feature_frontend, encoder=config.encoder, n_filters=config.frontend_filters, hidden_dim=config.snn_hidden_dim)
+    if config.feature_frontend == 'vp_projection':
+        model = VPSNNModel(encoder=config.encoder, n_filters=config.frontend_filters, hidden_dim=config.snn_hidden_dim, vp_latent_dim=config.vp_latent_dim, vp_frame_length=config.vp_frame_length, vp_frame_step=config.vp_frame_step, vp_encoder_decay=config.vp_encoder_decay, vp_spike_threshold=config.vp_spike_threshold)
+    else:
+        model = AdaptiveFrontEndSNNModel(frontend=config.feature_frontend, encoder=config.encoder, n_filters=config.frontend_filters, hidden_dim=config.snn_hidden_dim, vp_latent_dim=config.vp_latent_dim, vp_frame_length=config.vp_frame_length, vp_frame_step=config.vp_frame_step, vp_encoder_decay=config.vp_encoder_decay, vp_spike_threshold=config.vp_spike_threshold)
     return _train_torch_raw_model(model, train_np, val_np, test_np, config, output_dir)
 
 def run_experiment(config_path: str | Path) -> dict[str, Any]:

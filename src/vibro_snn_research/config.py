@@ -37,6 +37,11 @@ class ExperimentConfig:
     wavelet_width: int = 128
     wavelet_downsample: int = 4
     frontend_filters: int = 32
+    vp_latent_dim: int = 32
+    vp_frame_length: int = 128
+    vp_frame_step: int = 128
+    vp_encoder_decay: float = 0.9
+    vp_spike_threshold: float = 0.02
     snn_steps: int = 32
     snn_hidden_dim: int = 128
     output_dir: str = 'outputs/experiments/default'
